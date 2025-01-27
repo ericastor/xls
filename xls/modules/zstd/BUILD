@@ -15,6 +15,7 @@
 # Build rules for XLS ZSTD codec implementation.
 
 load("@rules_hdl//place_and_route:build_defs.bzl", "place_and_route")
+load("@rules_hdl//static_timing:build_defs.bzl", "run_opensta")
 load("@rules_hdl//synthesis:build_defs.bzl", "benchmark_synth", "synthesize_rtl")
 load("@rules_hdl//verilog:providers.bzl", "verilog_library")
 load(
@@ -25,6 +26,7 @@ load(
     "xls_dslx_library",
     "xls_dslx_test",
     "xls_dslx_verilog",
+    "xls_synthesis_metrics",
 )
 
 package(
@@ -1080,4 +1082,92 @@ place_and_route(
     synthesized_rtl = ":zstd_dec_synth_asap7",
     tags = ["manual"],
     target_die_utilization_percentage = "10",
+)
+
+_N_SEEDS = 250
+
+[
+    [
+        xls_dslx_verilog(
+            name = "zstd_dec_seed{}_verilog".format(seed),
+            codegen_args = {
+                "module_name": "ZstdDecoder",
+                "generator": "pipeline",
+                "delay_model": "asap7",
+                "ram_configurations": ",".join([
+                    "{ram_name}:1R1W:{rd_req}:{rd_resp}:{wr_req}:{wr_resp}:{latency}".format(
+                        latency = 5,
+                        ram_name = "ram{}".format(num),
+                        rd_req = "zstd_dec__ram_rd_req_{}_s".format(num),
+                        rd_resp = "zstd_dec__ram_rd_resp_{}_r".format(num),
+                        wr_req = "zstd_dec__ram_wr_req_{}_s".format(num),
+                        wr_resp = "zstd_dec__ram_wr_resp_{}_r".format(num),
+                    )
+                    for num in range(7)
+                ]),
+                "pipeline_stages": "10",
+                "reset": "rst",
+                "reset_data_path": "true",
+                "reset_active_low": "false",
+                "reset_asynchronous": "true",
+                "flop_inputs": "false",
+                "flop_single_value_channels": "false",
+                "flop_outputs": "false",
+                "worst_case_throughput": "1",
+                "use_system_verilog": "false",
+                "randomize_order_seed": str(seed),
+            },
+            dslx_top = "ZstdDecoder",
+            library = ":zstd_dec_dslx",
+            # TODO: 2024-01-15: Workaround for https://github.com/google/xls/issues/869
+            # Force proc inlining for IR optimization
+            opt_ir_args = {
+                "inline_procs": "true",
+            },
+            tags = ["manual"],
+            verilog_file = "zstd_dec_seed{}.v".format(seed),
+        ),
+        verilog_library(
+            name = "zstd_dec_seed{}_verilog_lib".format(seed),
+            srcs = [
+                ":zstd_dec_seed{}.v".format(seed),
+            ],
+            tags = ["manual"],
+        ),
+        synthesize_rtl(
+            name = "zstd_dec_seed{}_synth_asap7".format(seed),
+            standard_cells = "@org_theopenroadproject_asap7sc7p5t_28//:asap7-sc7p5t_rev28_rvt",
+            tags = ["manual"],
+            top_module = "ZstdDecoder",
+            deps = [
+                ":zstd_dec_seed{}_verilog_lib".format(seed),
+            ],
+        ),
+        run_opensta(
+            name = "zstd_dec_seed{}_opensta_asap7".format(seed),
+            synth_target = ":zstd_dec_seed{}_synth_asap7".format(seed),
+            tags = ["manual"],
+        ),
+        xls_synthesis_metrics(
+            name = "zstd_dec_seed{}_post_synth_metrics".format(seed),
+            srcs = [
+                ":zstd_dec_seed{}_synth_asap7".format(seed),
+                ":zstd_dec_seed{}_opensta_asap7".format(seed),
+            ],
+            tags = ["manual"],
+        ),
+    ]
+    for seed in range(
+        1,
+        _N_SEEDS + 1,
+    )
+]
+
+filegroup(
+    name = "zstd_dec_seeded_post_synth_metrics",
+    srcs = [":zstd_dec_seed{}_post_synth_metrics".format(seed) for seed in range(
+        1,
+        _N_SEEDS + 1,
+    )],
+    tags = ["manual"],
 )
